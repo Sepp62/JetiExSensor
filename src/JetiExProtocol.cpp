@@ -35,6 +35,8 @@
                      in order to improve behaviour on telemetry reset
   1.04   07/18/2017  dynamic sensor de-/activation
   1.05   11/12/2017  send 3 textframes before start of EX transmission to get transmitter ready
+  1.06   02/14/2021  Rainer Stransky: added implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
+                     to avoid deffered transmission of high prio data (vario). 
 
   Todo:
   - better check for ex buffer overruns
@@ -67,7 +69,7 @@
 // JetiSensor work data
 ///////////////////////
 JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
-  : m_id( 0 ), m_value( -1 ), m_bActive( true ), m_textLen( 0 ), m_unitLen( 0 ), m_dataType( 0 ), m_precision( 0 ), m_bufLen( 0 )
+  : m_id( 0 ), m_value( -1 ), m_bActive( true ), m_prio(1),  m_textLen( 0 ), m_unitLen( 0 ), m_dataType( 0 ), m_precision( 0 ), m_bufLen( 0 )
 {
   // sensor state
   m_bActive = (pProtocol->m_activeSensors[arrIdx >> 3] & (1 << (arrIdx & 7))) ? true : false;
@@ -83,6 +85,7 @@ JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
 
   // value
   m_value = pProtocol->m_pValues[ arrIdx ].m_value;
+  m_prio = pProtocol->m_pValues[ arrIdx ].m_prio;
 
   // copy to combined sensor/value buffer
   copyLabel( (const uint8_t*)constData.text, (const uint8_t*)constData.unit, m_label, sizeof( m_label ), &m_textLen, &m_unitLen );
@@ -205,13 +208,19 @@ uint8_t JetiExProtocol::DoJetiSend()
   return 0;
 }
 
-void JetiExProtocol::SetSensorValue( uint8_t id, int32_t value )
+/**
+ * @id: id of the sensor
+ * @value: value of the sensor to be transferred
+ * @prio: transmission prioity: 1=send with every frame, 2=send with every second frame, ....
+ */
+void JetiExProtocol::SetSensorValue( uint8_t id, int32_t value , uint8_t prio)
 {
   if( m_pValues && id < sizeof( m_sensorMapper ) )
     m_pValues[ m_sensorMapper[ id ] ].m_value = value;
+    m_pValues[ m_sensorMapper[ id ] ].m_prio = prio;
 }
 
-void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value )
+void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value, uint8_t prio )
 {
   // Jeti doc: If the lowest bit of a decimal point (Bit 5) equals log. 1, the data represents longitude. According to the highest bit (30) of a decimal point it is either West (1) or East (0).
   // Jeti doc: If the lowest bit of a decimal point (Bit 5) equals log. 0, the data represents latitude. According to the highest bit (30) of a decimal point it is either South (1) or North (0).
@@ -236,10 +245,10 @@ void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value
   gps.vBytes[3] |= bLongitude  ? 0x20 : 0;
   gps.vBytes[3] |= (value < 0) ? 0x40 : 0;
   
-  SetSensorValue( id, gps.vInt );
+  SetSensorValue( id, gps.vInt, prio );
 }
 
-void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year )
+void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year, uint8_t prio )
 {
   // Jeti doc: If the lowest bit of a decimal point equals log. 1, the data represents date
   // Jeti doc: (decimal representation: b0-7 day, b8-15 month, b16-20 year - 2 decimals, number 2000 to be added).
@@ -259,10 +268,10 @@ void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month,
   date.vBytes[2]  = day & 0x1F;
   date.vBytes[2] |= 0x20;
   
-  SetSensorValue( id, date.vInt );
+  SetSensorValue( id, date.vInt, prio );
 }
 
-void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second )
+void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second, uint8_t prio )
 {
   // If the lowest bit of a decimal point equals log. 0, the data represents time
   // (decimal representation: b0-7 seconds, b8-15 minutes, b16-20 hours).
@@ -277,7 +286,7 @@ void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minut
   date.vBytes[1]  = minute;
   date.vBytes[2]  = hour & 0x1F;
   
-  SetSensorValue( id, date.vInt );
+  SetSensorValue( id, date.vInt, prio );
 }
 
 void JetiExProtocol::SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST * pSensorArray )
@@ -436,7 +445,7 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
       if( ++m_sensorIdx >= m_nSensors )                                     // wrap index when array is at the end
         m_sensorIdx = 0;
 
-      if( sensor.m_bActive && sensor.m_value != -1 )                        // -1 is "invalid"
+      if( sensor.m_bActive && sensor.m_value != -1 && (frameCnt % sensor.m_prio) == 0)   // -1 is "invalid"
       {
 	      if( sensor.m_id > 15 )
 		    {

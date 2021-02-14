@@ -24,6 +24,8 @@
                      - JETI_DEBUG and BLOCKING_MODE removed (cleanup)
   1.02   03/28/2017  New sensor memory management. Sensor data can be located in PROGMEM
   1.04   07/18/2017  dynamic sensor de-/activation
+  1.05   02/14/2021  Rainer Stransky: added implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
+                     to avoid deffered transmission of high prio data (vario). 
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the "Software"),
@@ -85,6 +87,10 @@ public:
 protected:
   // value
   int32_t m_value;
+
+  // send priority / incidence
+  uint8_t m_prio;
+
 };
 
 // complete data for a sensor to fill ex frame buffer
@@ -115,6 +121,10 @@ public:
 
   // value
   uint8_t m_bActive;
+
+  // send priority / incidence
+  uint8_t m_prio;
+
 
   // label/description of value
   uint8_t m_label[ 20 ];
@@ -166,10 +176,10 @@ public:
   uint8_t DoJetiSend();                                                 // call periodically in loop()
 
   void SetDeviceId( uint8_t idLo, uint8_t idHi ) { m_devIdLow = idLo; m_devIdHi = idHi; } // adapt it, when you have multiple sensor devices connected to your REX
-  void SetSensorValue( uint8_t id, int32_t value );
-  void SetSensorValueGPS( uint8_t id, bool bLongitude, float value );
-  void SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year );
-  void SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second );
+  void SetSensorValue( uint8_t id, int32_t value, uint8_t prio=1 );
+  void SetSensorValueGPS( uint8_t id, bool bLongitude, float value, uint8_t prio=1 );
+  void SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year , uint8_t prio=1 );
+  void SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second , uint8_t prio=1 );
   void SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST * pSensorArray );
   void SetJetiboxText( enLineNo lineNo, const char* text );
   void SetJetiboxExit() { m_bExitNav = true; };
