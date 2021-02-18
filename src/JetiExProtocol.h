@@ -26,6 +26,8 @@
   1.04   07/18/2017  dynamic sensor de-/activation
   1.05   02/14/2021  Rainer Stransky: added implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
                      to avoid deffered transmission of high prio data (vario). 
+  1.07   02/18/2021  Rainer Stransky: fixed priorized sensor implementation and added interface to speed up frame send cycle 
+                     SetJetiSendCycle(aTime); 
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the "Software"),
@@ -82,7 +84,7 @@ class JetiValue
   friend class JetiExProtocol;
 public:
 
-  JetiValue() : m_value( -1 ) {}
+  JetiValue() : m_value( -1 ), m_prio( 0 ) {}
 
 protected:
   // value
@@ -123,7 +125,7 @@ public:
   uint8_t m_bActive;
 
   // send priority / incidence
-  uint8_t m_prio;
+  uint8_t* mp_prio;
 
 
   // label/description of value
@@ -174,6 +176,7 @@ public:
 
   void    Start( const char * name,  JETISENSOR_CONST * pSensorArray, enComPort comPort = DEFAULTPORT );   // call once in setup(), comPort: 0=Default, Teensy: 1..3
   uint8_t DoJetiSend();                                                 // call periodically in loop()
+  void SetJetiSendCycle(uint8_t aTime); 
 
   void SetDeviceId( uint8_t idLo, uint8_t idHi ) { m_devIdLow = idLo; m_devIdHi = idHi; } // adapt it, when you have multiple sensor devices connected to your REX
   void SetSensorValue( uint8_t id, int32_t value, uint8_t prio=1 );
@@ -205,6 +208,7 @@ protected:
   // EX frame control
   unsigned long      m_tiLastSend;         // last send time
   uint8_t            m_frameCnt;          
+  uint8_t            m_ExFrameSendCycle;          
 
   // sensor name
   char               m_name[ 20 ];
