@@ -35,6 +35,15 @@
                      in order to improve behaviour on telemetry reset
   1.04   07/18/2017  dynamic sensor de-/activation
   1.05   11/12/2017  send 3 textframes before start of EX transmission to get transmitter ready
+  1.06   02/14/2021  Rainer Stransky: added implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
+                     to avoid deffered transmission of high prio data (vario). 
+  1.07   02/18/2021  Rainer Stransky: fixed priorized sensor implementation and added interface to speed up frame send cycle 
+                     SetJetiSendCycle(aTime); 
+  1.08   02/28/2021  - bug fix: ex buffer overrun for sensor ids >15 fixed (forced strange behaviour in prio handling)
+                     - some more index size checks
+                     - simplified code for prio data handling
+                     - handling of -1 as invalid data removed, due to dynamic prio (SetSensorValue(..., prio) and SetSensorActive() 
+                       interface
 
   Todo:
   - better check for ex buffer overruns
@@ -83,6 +92,7 @@ JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
 
   // value
   m_value = pProtocol->m_pValues[ arrIdx ].m_value;
+  m_prio =  pProtocol->m_pValues[ arrIdx ].m_prio;
 
   // copy to combined sensor/value buffer
   copyLabel( (const uint8_t*)constData.text, (const uint8_t*)constData.unit, m_label, sizeof( m_label ), &m_textLen, &m_unitLen );
@@ -111,7 +121,7 @@ JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
 JetiExProtocol::JetiExProtocol() :
   m_tiLastSend( 0 ), m_frameCnt( 0 ), m_nameLen( 0 ), m_pSensorsConst( 0 ), m_pValues( 0 ), m_nSensors( 0 ),
   m_sensorIdx( 0 ), m_dictIdx( 0 ), m_pSerial( 0 ), m_alarmChar( 0 ), m_bExitNav( 0 ), 
-  m_devIdLow( DEVICE_ID_LOW ), m_devIdHi( DEVICE_ID_HI )
+  m_devIdLow( DEVICE_ID_LOW ), m_devIdHi( DEVICE_ID_HI ), m_ExFrameSendCycle ( 150 ) , m_ValueCycleCnt ( 1 )
 {
   m_name[0] = '\0';
   memset( m_activeSensors, 255, sizeof(m_activeSensors) ); // default: all sensors active
@@ -173,10 +183,15 @@ uint8_t JetiExProtocol::GetJetiboxKey()
   return m_pSerial->Getchar(); 
 }
 
+/// set the send cycle to the given value in ms (min = 75)
+void JetiExProtocol::SetJetiSendCycle(uint8_t aTime) { 
+  m_ExFrameSendCycle = max (75, aTime);     
+}
+
 uint8_t JetiExProtocol::DoJetiSend()
 {
   // send every 150 ms only
-  if( ( m_tiLastSend + 150 ) <= millis() )
+  if( ( m_tiLastSend + m_ExFrameSendCycle ) <= millis() )
   {
     m_tiLastSend = millis(); 
 
@@ -205,13 +220,28 @@ uint8_t JetiExProtocol::DoJetiSend()
   return 0;
 }
 
-void JetiExProtocol::SetSensorValue( uint8_t id, int32_t value )
+/**
+ * @id: id of the sensor
+ * @value: value of the sensor to be transferred
+ * @prio: transmission prioity: 1=send with every frame, 2=send with every second frame, ....,  
+ * #defines avaiable
+ *    JEP_PRIO_ULTRA_HIGH  1
+ *    JEP_PRIO_HIGH        3
+ *    JEP_PRIO_STANDARD    5
+ *    JEP_PRIO_LOW        10
+ *    JEP_PRIO_ULTRA_LOW  15
+ */
+void JetiExProtocol::SetSensorValue( uint8_t id, int32_t value , uint8_t prio)
 {
-  if( m_pValues && id < sizeof( m_sensorMapper ) )
-    m_pValues[ m_sensorMapper[ id ] ].m_value = value;
+  if( m_pValues && id < sizeof( m_sensorMapper ) ) { 
+    if (m_sensorMapper[ id ] < m_nSensors) {
+      m_pValues[ m_sensorMapper[ id ] ].m_value = value;
+      m_pValues[ m_sensorMapper[ id ] ].m_prio = prio;
+    }
+  } 
 }
 
-void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value )
+void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value, uint8_t prio )
 {
   // Jeti doc: If the lowest bit of a decimal point (Bit 5) equals log. 1, the data represents longitude. According to the highest bit (30) of a decimal point it is either West (1) or East (0).
   // Jeti doc: If the lowest bit of a decimal point (Bit 5) equals log. 0, the data represents latitude. According to the highest bit (30) of a decimal point it is either South (1) or North (0).
@@ -236,10 +266,10 @@ void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value
   gps.vBytes[3] |= bLongitude  ? 0x20 : 0;
   gps.vBytes[3] |= (value < 0) ? 0x40 : 0;
   
-  SetSensorValue( id, gps.vInt );
+  SetSensorValue( id, gps.vInt, prio );
 }
 
-void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year )
+void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year, uint8_t prio )
 {
   // Jeti doc: If the lowest bit of a decimal point equals log. 1, the data represents date
   // Jeti doc: (decimal representation: b0-7 day, b8-15 month, b16-20 year - 2 decimals, number 2000 to be added).
@@ -259,10 +289,10 @@ void JetiExProtocol::SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month,
   date.vBytes[2]  = day & 0x1F;
   date.vBytes[2] |= 0x20;
   
-  SetSensorValue( id, date.vInt );
+  SetSensorValue( id, date.vInt, prio );
 }
 
-void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second )
+void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second, uint8_t prio )
 {
   // If the lowest bit of a decimal point equals log. 0, the data represents time
   // (decimal representation: b0-7 seconds, b8-15 minutes, b16-20 hours).
@@ -277,7 +307,7 @@ void JetiExProtocol::SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minut
   date.vBytes[1]  = minute;
   date.vBytes[2]  = hour & 0x1F;
   
-  SetSensorValue( id, date.vInt );
+  SetSensorValue( id, date.vInt, prio );
 }
 
 void JetiExProtocol::SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST * pSensorArray )
@@ -285,13 +315,14 @@ void JetiExProtocol::SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST
   if( m_nSensors == 0 && pSensorArray ) // dont do it more than once
     InitSensorMapper( pSensorArray );
 
-  if( id < sizeof( m_sensorMapper ) )
-  {
+  if( id < sizeof( m_sensorMapper ) ) {
     int idx = m_sensorMapper[ id ];
-    if( bEnable )
-      m_activeSensors[ idx >>3 ] |=   1 << (idx & 7);
-    else
-      m_activeSensors[ idx >>3 ] &= ~(1 << (idx & 7));
+    if (idx < m_nSensors) {
+      if( bEnable )
+        m_activeSensors[ idx >>3 ] |=   1 << (idx & 7);
+      else
+        m_activeSensors[ idx >>3 ] &= ~(1 << (idx & 7));
+    }
   }
 
   // restart sending dictionary
@@ -396,7 +427,7 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
   // sensor name in frame 0
   if( frameCnt == 0 )
   {                                                                // sensor name
-    m_exBuffer[2] = 0x00;  			                                   // 2Bit packet type(0-3) 0x40=Data, 0x00=Text 
+    m_exBuffer[2] = 0x00;                                           // 2Bit packet type(0-3) 0x40=Data, 0x00=Text 
     m_exBuffer[8] = 0x00;                                          // 8Bit id 
     m_exBuffer[9] = m_nameLen<<3;                                  // 5Bit description, 3Bit unit length (use one space character)
     memcpy( m_exBuffer + 10, m_name, m_nameLen );                  // copy label plus unit to ex buffer starting from pos 10
@@ -414,8 +445,8 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
       if( sensor.m_bActive )
       {
         m_exBuffer[2] = 0x00;                                          // 2Bit packet type(0-3) 0x40=Data, 0x00=Text
-        m_exBuffer[8] = sensor.m_id;  	                               // 8Bit id
-        m_exBuffer[9] = (sensor.m_textLen<<3) | sensor.m_unitLen;	     // 5Bit description, 3Bit unit length 
+        m_exBuffer[8] = sensor.m_id;                                   // 8Bit id
+        m_exBuffer[9] = (sensor.m_textLen<<3) | sensor.m_unitLen;       // 5Bit description, 3Bit unit length 
         n = sensor.jetiCopyLabel( m_exBuffer, 10 ) + 10;               // copy label plus unit to ex buffer starting from pos 10
         break;
       }
@@ -426,43 +457,57 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
   {
     int bufLen;
     int nVal = 0;                                                  // count values 
-    m_exBuffer[ 2 ] = 0x40;						                             // 2Bit Type(0-3) 0x40=Data, 0x00=Text
-    n=8;						                                               // start at nineth byte in buffer
+    m_exBuffer[ 2 ] = 0x40;                                         // 2Bit Type(0-3) 0x40=Data, 0x00=Text
+    n=8;                                                           // start at nineth byte in buffer
 
     do
     {
-      bufLen = 0;                                                           // last value buffer length    
       JetiSensor sensor( m_sensorIdx, this );
-      if( ++m_sensorIdx >= m_nSensors )                                     // wrap index when array is at the end
-        m_sensorIdx = 0;
 
-      if( sensor.m_bActive && sensor.m_value != -1 )                        // -1 is "invalid"
-      {
-	      if( sensor.m_id > 15 )
-		    {
-		      m_exBuffer[n++] = 0x0 | (sensor.m_dataType & 0x0F);               // sensor id > 15 --> put id to next byte
-		      m_exBuffer[n++] = sensor.m_id;		
-		    }
-		    else
-		      m_exBuffer[n++] = (sensor.m_id<<4) | (sensor.m_dataType & 0x0F);  // 4Bit id, 4 bit data type (i.e. int14_t)
-			
-        bufLen = sensor.m_bufLen;
+      if( sensor.m_bActive && ((m_ValueCycleCnt%sensor.m_prio) == 0)) {
+        //  id+type+value+precision + CRC
+        bufLen = sensor.m_bufLen + 1 ;
+        if( sensor.m_id > 15 ) {
+          //  next byte for id > 15
+          bufLen++;
+	  if (n + bufLen > JEP_MAX_BYTE_PER_BUF) {
+	    // not enough bytes free
+            break;
+	  }
+          m_exBuffer[n++] = 0x0 | (sensor.m_dataType & 0x0F);               // sensor id > 15 --> put id to next byte
+          m_exBuffer[n++] = sensor.m_id;    
+        } else {
+	  if (n + bufLen > JEP_MAX_BYTE_PER_BUF) {
+	    // not enough bytes free
+            break;
+	  }
+          m_exBuffer[n++] = (sensor.m_id<<4) | (sensor.m_dataType & 0x0F);  // 4Bit id, 4 bit data type (i.e. int14_t)
+	}
+      
         n += sensor.jetiEncodeValue( m_exBuffer, n );
       }
-      if( ++nVal >= m_nSensors )                                            // dont send twice in a frame
+
+      if( ++m_sensorIdx >= m_nSensors ) {                                    // wrap index when array is at the end
+        m_sensorIdx = 0;
+	m_ValueCycleCnt++;
+      }
+      if( ++nVal >= m_nSensors ) {                                           // dont send twice in a frame
         break;
+      }
     }
-    while( n < ( 26 - bufLen ) );                                           // jeti spec says max 29 Bytes per buffer
+    while( true );                                           // jeti spec says max 29 Bytes per buffer
   }
 
   // complete some more EX frame data
-  m_exBuffer[0] = 0x7E;                m_exBuffer[1] = 0x2F;			          // EX-Frame Separator
-  m_exBuffer[2] |= n-2;					                                            // frame length to Byte 2
+  //  8 Byte Header
+  m_exBuffer[0] = 0x7E;                m_exBuffer[1] = 0x2F;                // EX-Frame Separator
+  m_exBuffer[2] |= n-2;                                                      // frame length to Byte 2
   m_exBuffer[3] = MANUFACTURER_ID_LOW; m_exBuffer[4] = MANUFACTURER_ID_HI;  // sensor ID
   m_exBuffer[5] = m_devIdLow;          m_exBuffer[6] = m_devIdHi;
   m_exBuffer[7] = 0x00; // reserved (key for encryption)
 
   // calculate crc
+  // 1 Byte CRC
   m_exBuffer[n] = jeti_crc8( m_exBuffer, n );
 
   // serial transmission
@@ -502,7 +547,7 @@ uint8_t JetiSensor::jetiEncodeValue( uint8_t * exbuf, uint8_t n )
     exbuf[n]  = ( m_value & 0x1F) | ((m_value < 0) ? 0x80 :0x00 );                   // 5 bit value and sign 
     exbuf[n] |= m_precision;                                                         // precision in bit 5/6 (0, 20, 40)
     return 1;
-	
+  
   case TYPE_14b:
     exbuf[n]      = m_value & 0xFF;                                                  // lo byte
     exbuf[n + 1]  = ( (m_value >> 8) & 0x1F) | ((m_value < 0) ? 0x80 :0x00 );        // 5 bit hi byte and sign 
@@ -579,3 +624,4 @@ uint8_t JetiExProtocol::jeti_crc8 (uint8_t *exbuf, unsigned char framelen)
     crc = update_crc (exbuf[c], crc);
   return (crc);
 }
+

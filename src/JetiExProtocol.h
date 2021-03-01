@@ -24,6 +24,15 @@
                      - JETI_DEBUG and BLOCKING_MODE removed (cleanup)
   1.02   03/28/2017  New sensor memory management. Sensor data can be located in PROGMEM
   1.04   07/18/2017  dynamic sensor de-/activation
+  1.05   02/14/2021  Rainer Stransky: added implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
+                     to avoid deffered transmission of high prio data (vario). 
+  1.07   02/18/2021  Rainer Stransky: fixed priorized sensor implementation and added interface to speed up frame send cycle 
+                     SetJetiSendCycle(aTime); 
+  1.08   02/28/2021  - bug fix: ex buffer overrun for sensor ids >15 fixed (forced strange behaviour in prio handling)
+                     - some more index size checks
+                     - simplified code for prio data handling
+                     - handling of -1 as invalid data removed, due to dynamic prio (SetSensorValue(..., prio) and SetSensorActive() 
+                       interface
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the "Software"),
@@ -47,11 +56,19 @@
 #ifndef JETIEXPROTOCOL_H
 #define JETIEXPROTOCOL_H
 
+#define JEP_PRIO_ULTRA_HIGH  1
+#define JEP_PRIO_HIGH        3
+#define JEP_PRIO_STANDARD    5
+#define JEP_PRIO_LOW        10
+#define JEP_PRIO_ULTRA_LOW  15
+
 #if ARDUINO >= 100
  #include <Arduino.h>
 #else
  #include <WProgram.h>
 #endif
+
+#define JEP_MAX_BYTE_PER_BUF 29
 
 #include "JetiExSerial.h"
 #include <new.h>
@@ -80,11 +97,14 @@ class JetiValue
   friend class JetiExProtocol;
 public:
 
-  JetiValue() : m_value( -1 ) {}
+  JetiValue() : m_value( -1 ), m_prio( 0 ) {}
 
 protected:
   // value
   int32_t m_value;
+
+  // send priority 
+  uint8_t m_prio;
 };
 
 // complete data for a sensor to fill ex frame buffer
@@ -115,6 +135,9 @@ public:
 
   // value
   uint8_t m_bActive;
+
+  // send priority / incidence
+  uint8_t m_prio;
 
   // label/description of value
   uint8_t m_label[ 20 ];
@@ -164,12 +187,13 @@ public:
 
   void    Start( const char * name,  JETISENSOR_CONST * pSensorArray, enComPort comPort = DEFAULTPORT );   // call once in setup(), comPort: 0=Default, Teensy: 1..3
   uint8_t DoJetiSend();                                                 // call periodically in loop()
+  void SetJetiSendCycle(uint8_t aTime); 
 
   void SetDeviceId( uint8_t idLo, uint8_t idHi ) { m_devIdLow = idLo; m_devIdHi = idHi; } // adapt it, when you have multiple sensor devices connected to your REX
-  void SetSensorValue( uint8_t id, int32_t value );
-  void SetSensorValueGPS( uint8_t id, bool bLongitude, float value );
-  void SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year );
-  void SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second );
+  void SetSensorValue( uint8_t id, int32_t value, uint8_t prio=1 );
+  void SetSensorValueGPS( uint8_t id, bool bLongitude, float value, uint8_t prio=1 );
+  void SetSensorValueDate( uint8_t id, uint8_t day, uint8_t month, uint16_t year , uint8_t prio=1 );
+  void SetSensorValueTime( uint8_t id, uint8_t hour, uint8_t minute, uint8_t second , uint8_t prio=1 );
   void SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST * pSensorArray );
   void SetJetiboxText( enLineNo lineNo, const char* text );
   void SetJetiboxExit() { m_bExitNav = true; };
@@ -195,6 +219,7 @@ protected:
   // EX frame control
   unsigned long      m_tiLastSend;         // last send time
   uint8_t            m_frameCnt;          
+  uint8_t            m_ExFrameSendCycle;          
 
   // sensor name
   char               m_name[ 20 ];
@@ -205,6 +230,7 @@ protected:
   JetiValue        * m_pValues;                     // sensor value array, same order as constant data array
   int                m_nSensors;                    // number of sensors
   uint8_t            m_sensorIdx;                   // current index to sensor array to send value
+  uint8_t            m_ValueCycleCnt;                   // current index to sensor array to send value
   uint8_t            m_dictIdx;                     // current index to sensor array to send sensor dictionary
   uint8_t            m_sensorMapper[ MAX_SENSORS ]; // id to idx lookup table to accelerate SetSensorValue()
   uint8_t            m_activeSensors[ MAX_SENSORBYTES ]; // bit array for active sensor bit field
