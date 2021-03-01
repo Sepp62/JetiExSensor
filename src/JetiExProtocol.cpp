@@ -39,6 +39,11 @@
                      to avoid deffered transmission of high prio data (vario). 
   1.07   02/18/2021  Rainer Stransky: fixed priorized sensor implementation and added interface to speed up frame send cycle 
                      SetJetiSendCycle(aTime); 
+  1.08   02/28/2021  - bug fix: ex buffer overrun for sensor ids >15 fixed (forced strange behaviour in prio handling)
+                     - some more index size checks
+                     - simplified code for prio data handling
+                     - handling of -1 as invalid data removed, due to dynamic prio (SetSensorValue(..., prio) and SetSensorActive() 
+                       interface
 
   Todo:
   - better check for ex buffer overruns
@@ -87,7 +92,7 @@ JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
 
   // value
   m_value = pProtocol->m_pValues[ arrIdx ].m_value;
-  mp_prio = &pProtocol->m_pValues[ arrIdx ].m_prio;
+  m_prio =  pProtocol->m_pValues[ arrIdx ].m_prio;
 
   // copy to combined sensor/value buffer
   copyLabel( (const uint8_t*)constData.text, (const uint8_t*)constData.unit, m_label, sizeof( m_label ), &m_textLen, &m_unitLen );
@@ -116,7 +121,7 @@ JetiSensor::JetiSensor( int arrIdx, JetiExProtocol * pProtocol )
 JetiExProtocol::JetiExProtocol() :
   m_tiLastSend( 0 ), m_frameCnt( 0 ), m_nameLen( 0 ), m_pSensorsConst( 0 ), m_pValues( 0 ), m_nSensors( 0 ),
   m_sensorIdx( 0 ), m_dictIdx( 0 ), m_pSerial( 0 ), m_alarmChar( 0 ), m_bExitNav( 0 ), 
-  m_devIdLow( DEVICE_ID_LOW ), m_devIdHi( DEVICE_ID_HI ), m_ExFrameSendCycle ( 150 )     
+  m_devIdLow( DEVICE_ID_LOW ), m_devIdHi( DEVICE_ID_HI ), m_ExFrameSendCycle ( 150 ) , m_ValueCycleCnt ( 1 )
 {
   m_name[0] = '\0';
   memset( m_activeSensors, 255, sizeof(m_activeSensors) ); // default: all sensors active
@@ -218,18 +223,22 @@ uint8_t JetiExProtocol::DoJetiSend()
 /**
  * @id: id of the sensor
  * @value: value of the sensor to be transferred
- * @prio: transmission prioity: 1=send with every frame, 2=send with every second frame, ....
+ * @prio: transmission prioity: 1=send with every frame, 2=send with every second frame, ....,  
+ * #defines avaiable
+ *    JEP_PRIO_ULTRA_HIGH  1
+ *    JEP_PRIO_HIGH        3
+ *    JEP_PRIO_STANDARD    5
+ *    JEP_PRIO_LOW        10
+ *    JEP_PRIO_ULTRA_LOW  15
  */
 void JetiExProtocol::SetSensorValue( uint8_t id, int32_t value , uint8_t prio)
 {
-  if( m_pValues && id < sizeof( m_sensorMapper ) )
-    m_pValues[ m_sensorMapper[ id ] ].m_value = value;
-    uint8_t p = min(15, max( 1, prio)); // normalize prio to 1-15
-    
-    // m_prio first four bits = requested prio for sending the value each n.th frame
-    // m_prio last four bits = counter to check when the value shall be send
-    m_pValues[ m_sensorMapper[ id ] ].m_prio &= ~(0x0F); // clear the first four bits
-    m_pValues[ m_sensorMapper[ id ] ].m_prio |= p; // now set the given 4 prio bits
+  if( m_pValues && id < sizeof( m_sensorMapper ) ) { 
+    if (m_sensorMapper[ id ] < m_nSensors) {
+      m_pValues[ m_sensorMapper[ id ] ].m_value = value;
+      m_pValues[ m_sensorMapper[ id ] ].m_prio = prio;
+    }
+  } 
 }
 
 void JetiExProtocol::SetSensorValueGPS( uint8_t id, bool bLongitude, float value, uint8_t prio )
@@ -306,13 +315,14 @@ void JetiExProtocol::SetSensorActive( uint8_t id, bool bEnable, JETISENSOR_CONST
   if( m_nSensors == 0 && pSensorArray ) // dont do it more than once
     InitSensorMapper( pSensorArray );
 
-  if( id < sizeof( m_sensorMapper ) )
-  {
+  if( id < sizeof( m_sensorMapper ) ) {
     int idx = m_sensorMapper[ id ];
-    if( bEnable )
-      m_activeSensors[ idx >>3 ] |=   1 << (idx & 7);
-    else
-      m_activeSensors[ idx >>3 ] &= ~(1 << (idx & 7));
+    if (idx < m_nSensors) {
+      if( bEnable )
+        m_activeSensors[ idx >>3 ] |=   1 << (idx & 7);
+      else
+        m_activeSensors[ idx >>3 ] &= ~(1 << (idx & 7));
+    }
   }
 
   // restart sending dictionary
@@ -452,42 +462,44 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
 
     do
     {
-      bufLen = 0;                                                           // last value buffer length    
       JetiSensor sensor( m_sensorIdx, this );
-      if( ++m_sensorIdx >= m_nSensors )                                     // wrap index when array is at the end
-        m_sensorIdx = 0;
 
-
-      uint8_t prio = *sensor.mp_prio & 0x0F; // first four bits are prio (1-15)
-      uint8_t cnt = *sensor.mp_prio >> 4; // last four bits are the send counter (0-15)
-      if (cnt%prio == 0) {
-        cnt = 1;
-      } else {
-        cnt++;
-      }
-      *sensor.mp_prio &= ~(0xF0); // clear the last four bits
-      *sensor.mp_prio |= (cnt << 4) ; // now set the counter to the last four bits
-      
-      if( sensor.m_bActive && sensor.m_value != -1 && cnt == 1)   // -1 is "invalid"
-      {
-        if( sensor.m_id > 15 )
-        {
+      if( sensor.m_bActive && ((m_ValueCycleCnt%sensor.m_prio) == 0)) {
+        //  id+type+value+precision + CRC
+        bufLen = sensor.m_bufLen + 1 ;
+        if( sensor.m_id > 15 ) {
+          //  next byte for id > 15
+          bufLen++;
+	  if (n + bufLen > JEP_MAX_BYTE_PER_BUF) {
+	    // not enough bytes free
+            break;
+	  }
           m_exBuffer[n++] = 0x0 | (sensor.m_dataType & 0x0F);               // sensor id > 15 --> put id to next byte
           m_exBuffer[n++] = sensor.m_id;    
-        }
-        else
+        } else {
+	  if (n + bufLen > JEP_MAX_BYTE_PER_BUF) {
+	    // not enough bytes free
+            break;
+	  }
           m_exBuffer[n++] = (sensor.m_id<<4) | (sensor.m_dataType & 0x0F);  // 4Bit id, 4 bit data type (i.e. int14_t)
+	}
       
-        bufLen = sensor.m_bufLen;
         n += sensor.jetiEncodeValue( m_exBuffer, n );
       }
-      if( ++nVal >= m_nSensors )                                            // dont send twice in a frame
+
+      if( ++m_sensorIdx >= m_nSensors ) {                                    // wrap index when array is at the end
+        m_sensorIdx = 0;
+	m_ValueCycleCnt++;
+      }
+      if( ++nVal >= m_nSensors ) {                                           // dont send twice in a frame
         break;
+      }
     }
-    while( n < ( 26 - bufLen ) );                                           // jeti spec says max 29 Bytes per buffer
+    while( true );                                           // jeti spec says max 29 Bytes per buffer
   }
 
   // complete some more EX frame data
+  //  8 Byte Header
   m_exBuffer[0] = 0x7E;                m_exBuffer[1] = 0x2F;                // EX-Frame Separator
   m_exBuffer[2] |= n-2;                                                      // frame length to Byte 2
   m_exBuffer[3] = MANUFACTURER_ID_LOW; m_exBuffer[4] = MANUFACTURER_ID_HI;  // sensor ID
@@ -495,6 +507,7 @@ void JetiExProtocol::SendExFrame( uint8_t frameCnt )
   m_exBuffer[7] = 0x00; // reserved (key for encryption)
 
   // calculate crc
+  // 1 Byte CRC
   m_exBuffer[n] = jeti_crc8( m_exBuffer, n );
 
   // serial transmission
