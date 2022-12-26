@@ -43,6 +43,15 @@ Serial interface to transmit telemetry data to Jeti Duplex receivers. For Arduin
                          in order to improve behaviour on telemetry reset
     1.04   07/18/2017  dynamic sensor de-/activation
     1.05   11/12/2017  send 3 textframes before start of EX transmission to get transmitter ready
+    1.06   02/14/2021  enhance interface / implementation for priorized sensor send capabilities (SetSensorValue(id, value, prio))
+                       to avoid deffered transmission of high prio data (vario). 
+    1.07   02/18/2021  fixed priorized sensor implementation and added interface to speed up frame send cycle (SetJetiSendCycle(aTime)) 
+    1.08   02/28/2021  - bug fix: ex buffer overrun for sensor ids >15 fixed (forced strange behaviour in prio handling)
+                       - some more index size checks
+                       - simplified code for prio data handling
+                       - handling of -1 as invalid data removed, due to dynamic prio (SetSensorValue(..., prio) and SetSensorActive() 
+                         interface
+
 
 == License ==
 
